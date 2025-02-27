@@ -134,7 +134,7 @@ final class HomeViewModel: HomeViewModelprotocol {
     }
     
     private func fetchImages(page: Int) -> Observable<[ItemImageModel]> {
-        NetworkService.shared.request(HomeAPIRouter.getImage(pageIndex: page, limit: 100))
+        NetworkService.shared.request(HomeAPIEndPoint.getImage(pageIndex: page, limit: 100))
             .catch { [weak self] error in
                 self?.handleError(error)
                 return .just([])

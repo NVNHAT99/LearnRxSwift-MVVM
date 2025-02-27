@@ -21,20 +21,23 @@ enum NetworkError: Error {
     case invalidURL
     case requestFailed
     case decodingError
+    case encodingFailed
     case serverError(statusCode: Int)
     case noData
     case unauthorized
     case networkConnectionError
+    case missingURL
+    case other(message: String)
 }
 
 // MARK: - Protocols
 protocol NetworkServiceProtocol {
     func request<T: Decodable>(
-        _ router: APIRouterProtocol) -> Observable<T>
+        _ router: EndPointType) -> Observable<T>
     
 
     func requestRawData(
-        _ router: APIRouterProtocol
+        _ router: EndPointType
     ) -> Observable<Data>
 }
 
@@ -54,28 +57,32 @@ class NetworkService: NetworkServiceProtocol {
     }
 
     // MARK: - Request with Decoding
-    func request<T: Decodable>(_ router: APIRouterProtocol) -> Observable<T> {
-        guard let urlRequest = try? router.asURLRequest() else {
-            return Observable.error(NetworkError.invalidURL)
+    func request<T: Decodable>(_ router: EndPointType) -> Observable<T> {
+        do {
+            let urlRequest = try self.buildRequest(from: router)
+            
+            return performRequest(urlRequest)
+                .map { data in
+                    try JSONDecoder().decode(T.self, from: data)
+                }.catch { error in
+                    return Observable.error(NetworkError.decodingError)
+                }
+        } catch {
+            return Observable.error(error)
         }
-        
-        return performRequest(urlRequest)
-            .map { data in
-                try JSONDecoder().decode(T.self, from: data)
-            }.catch { error in
-                return Observable.error(NetworkError.decodingError)
-            }
     }
 
     // MARK: - Raw Data Request
-    func requestRawData(_ router: APIRouterProtocol) -> Observable<Data> {
-        // Build URLRequest
-        guard let urlRequest = try? router.asURLRequest() else {
-            return .error(NetworkError.invalidURL)
-        }
+    func requestRawData(_ router: EndPointType) -> Observable<Data> {
+        do {
+            // Build URLRequest
+            let urlRequest = try self.buildRequest(from: router)
 
-        // Perform request
-        return performRequest(urlRequest)
+            // Perform request
+            return performRequest(urlRequest)
+        } catch {
+            return Observable.error(error)
+        }
     }
 
     // MARK: - Private Helper Methods
@@ -116,6 +123,95 @@ class NetworkService: NetworkServiceProtocol {
             
             task.resume()
             return Disposables.create { task.cancel() }
+        }
+    }
+}
+
+extension NetworkService {
+    private func buildRequest(from endPoint: EndPointType) throws -> URLRequest {
+        let url = endPoint.path != "" ? endPoint.baseURL.appendingPathComponent(endPoint.path) : endPoint.baseURL
+        
+        var request = URLRequest(url: url, timeoutInterval: endPoint.timeoutInterval ?? 30.0)
+        request.httpMethod = endPoint.method.rawValue
+        
+        endPoint.headers?.forEach { key, value in
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        
+        do {
+            switch endPoint.task {
+                
+            case .request:
+                request.setValue(ContentType.json.rawValue, forHTTPHeaderField: HTTPHeaderField.contentType.rawValue)
+            case .requestParameters(let bodyParameters,
+                                    let urlParameters,
+                                    let parameterEncoding):
+                
+                try self.configureParameters(bodyParameters: bodyParameters,
+                                             urlParameters: urlParameters,
+                                             parameterEncoding: parameterEncoding,
+                                             request: &request)
+            case .requestParametersAndHeaders(let bodyParameters,
+                                              let urlParameters,
+                                              let additionHeaders,
+                                              let parameterEncoding):
+                
+                self.addAdditionalHeaders(additionHeaders, request: &request)
+                
+                try self.configureParameters(bodyParameters: bodyParameters,
+                                             urlParameters: urlParameters,
+                                             parameterEncoding: parameterEncoding,
+                                             request: &request)
+            case .requestMultiPart(let bodyParameters,
+                                   let urlParameters,
+                                   let additionHeaders,
+                                   let parameterEncoding):
+                
+                self.addAdditionalHeaders(additionHeaders,
+                                          request: &request)
+                
+                try self.configureParameters(bodyParameters: bodyParameters,
+                                             urlParameters: urlParameters,
+                                             parameterEncoding: parameterEncoding,
+                                             request: &request)
+               
+            }
+        }
+        return request
+    }
+    
+    func addAdditionalHeaders(_ additionalHeaders: HTTPHeaders?, request: inout URLRequest) {
+        guard let headers = additionalHeaders else { return }
+        for (key, value) in headers {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+    }
+    
+    func configureParameters(
+        bodyParameters: Parameters?,
+        urlParameters: Parameters?,
+        parameterEncoding: ParameterEncoding,
+        request: inout URLRequest
+    ) throws {
+        do {
+            try parameterEncoding.encode(from: &request,
+                                    bodyParameters: bodyParameters,
+                                    urlParameters: urlParameters)
+        } catch {
+            throw error
+        }
+    }
+    
+    func configureParameters(
+        bodyParameters: MultipartFormData,
+        urlParameters: Parameters?,
+        parameterEncoding: ParameterEncoding,
+        request: inout URLRequest
+    ) throws {
+        do {
+            try parameterEncoding.encode(urlRequest: &request, bodyParameters: bodyParameters)
+        } catch {
+            throw error
         }
     }
 }
